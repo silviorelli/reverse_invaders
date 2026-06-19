@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>REVERSE INVADERS // Command the Horde</title>
+<style>
+  :root { --crt: #0b0f1a; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #05070d;
+    color: #c8f7ff;
+    font-family: "Courier New", monospace;
+    overflow: hidden;
+    -webkit-font-smoothing: none;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background:
+      radial-gradient(circle at 50% 40%, #0d1424 0%, #05070d 70%);
+  }
+  #stage {
+    position: relative;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    box-shadow: 0 0 0 2px #1b2a44, 0 0 40px #0a2a44, 0 0 90px #06203a inset;
+    border-radius: 6px;
+  }
+  /* Scope visual styling to the GAME canvas only — the #ui text canvas must
+     stay transparent and smooth, or it would paint over the ships. */
+  #game {
+    display: block;
+    /* Scale the 320x240 buffer up to fill the viewport (keeps 4:3, stays pixel-crisp).
+       This enlarges the pixel art along with everything else. */
+    width: min(92vw, 120vh);
+    height: auto;
+    aspect-ratio: 4 / 3;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #05070d;
+    border-radius: 6px;
+  }
+  /* High-resolution text layer — sits ABOVE the scanlines so text stays crisp & bright */
+  #ui {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    border-radius: 6px;
+  }
+  /* CRT scanline + vignette overlay */
+  #scan {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    border-radius: 6px;
+    background:
+      repeating-linear-gradient(
+        to bottom,
+        rgba(0,0,0,0) 0px,
+        rgba(0,0,0,0) 2px,
+        rgba(0,0,0,0.22) 3px,
+        rgba(0,0,0,0.22) 4px
+      ),
+      radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 55%, rgba(0,0,0,0.55) 100%);
+    mix-blend-mode: multiply;
+  }
+  #hint {
+    margin-top: 14px;
+    font-size: 18px;
+    letter-spacing: 2px;
+    color: #4f7aa8;
+    text-align: center;
+    text-transform: uppercase;
+  }
+  #hint b { color: #9fe6ff; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="stage">
+      <canvas id="game" width="320" height="240"></canvas>
+      <div id="scan"></div>
+      <canvas id="ui"></canvas>
+    </div>
+    <div id="hint">
+      <b>WASD</b> steer the horde &nbsp;•&nbsp; <b>SPACE</b> fire volley &nbsp;•&nbsp;
+      <b>P</b> pause &nbsp;•&nbsp; <b>M</b> mute &nbsp;•&nbsp; <b>ENTER</b> start / restart
+    </div>
+  </div>
+
+<script>
+"use strict";
+//============================================================================
+// REVERSE INVADERS
+// You command the alien HORDE (WASD = steer the whole swarm, SPACE = volley).
+// A CPU-piloted defender ship dodges and fights back. Destroy it to win.
+//============================================================================
+
+const cvs = document.getElementById("game");
+const ctx = cvs.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+// Separate high-res canvas for crisp anti-aliased text (drawn above the scanlines).
+const ui = document.getElementById("ui");
+const uctx = ui.getContext("2d");
+let uiScale = 1;
+
+const W = cvs.width;   // 320
+const H = cvs.height;  // 240
+
+//--------------------------------------------------------------- PIXEL SPRITES
+// '.' = transparent, any other char maps to a color in the palette.
+function makeSprite(rows, palette) {
+  const h = rows.length, w = rows[0].length;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const g = c.getContext("2d");
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const ch = rows[y][x];
+      if (ch === "." || !palette[ch]) continue;
+      g.fillStyle = palette[ch];
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  c.cx = w / 2; c.cy = h / 2;
+  return c;
+}
+
+// Defender hero ship (points UP, it sits at the bottom firing upward)
+const HERO_SPR = makeSprite([
+  "....W....",
+  "...WWW...",
+  "...WBW...",
+  "..WWBWW..",
+  ".WCWBWCW.",
+  ".WCCCCCW.",
+  "WCC C CCW".replace(/ /g,"C"),
+  "WC.CCC.CW",
+  "C.C.C.C.C",
+], { W:"#e9fbff", C:"#37c7ff", B:"#ffd34d" });
+
+// Two alien variants for visual variety (point DOWN — they attack downward)
+const ALIEN_A = makeSprite([
+  "..G...G..",
+  "...G.G...",
+  "..GGGGG..",
+  ".GG.G.GG.",
+  "GGGGGGGGG",
+  "G.GGGGG.G",
+  "G.G...G.G",
+  "...G.G...",
+], { G:"#5dff8a" });
+
+const ALIEN_B = makeSprite([
+  "..P...P..",
+  "P..P.P..P",
+  "P.PPPPP.P",
+  "PPP.P.PPP",
+  "PPPPPPPPP",
+  ".PPPPPPP.",
+  "..P...P..",
+  ".P.....P.",
+], { P:"#ff5db0" });
+
+const ALIEN_C = makeSprite([
+  "...YYY...",
+  "..YYYYY..",
+  ".YYOYOYY.",
+  "YYYYYYYYY",
+  "Y.YYYYY.Y",
+  "Y.Y...Y.Y",
+  "..Y...Y..",
+  ".Y.....Y.",
+], { Y:"#ffd34d", O:"#1a1030" });
+
+const ALIEN_TYPES = [
+  { spr: ALIEN_A, hp: 1, bullet: "#7dffb0", score: 10 },
+  { spr: ALIEN_B, hp: 1, bullet: "#ff8fd0", score: 10 },
+  { spr: ALIEN_C, hp: 2, bullet: "#ffe27d", score: 20 },
+];
+
+//--------------------------------------------------------------------- HELPERS
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const sign  = v => v < 0 ? -1 : v > 0 ? 1 : 0;
+let _seed = 1337;
+function rnd() { // deterministic-ish but fine for a game
+  _seed = (_seed * 1103515245 + 12345) & 0x7fffffff;
+  return _seed / 0x7fffffff;
+}
+function rrange(a, b) { return a + rnd() * (b - a); }
+function aabb(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+//------------------------------------------------------------- HIGH-RES TEXT
+// Match the UI canvas's pixel buffer to its on-screen size (× devicePixelRatio)
+// so anti-aliased text renders at native resolution instead of being upscaled.
+let _uiW = 0, _uiH = 0;
+function syncUI() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = cvs.getBoundingClientRect();
+  const w = Math.max(1, Math.round(r.width * dpr));
+  const h = Math.max(1, Math.round(r.height * dpr));
+  if (w !== _uiW || h !== _uiH) {
+    ui.width = w; ui.height = h;
+    _uiW = w; _uiH = h;
+    uiScale = w / W;            // game units → UI pixels
+  }
+}
+// Draw text positioned in 320x240 game coordinates, rendered at full UI resolution.
+function uiText(txt, gx, gy, gpx, color, align, baseline) {
+  const s = uiScale;
+  uctx.font = Math.round(gpx * s) + "px 'Courier New', monospace";
+  uctx.textAlign = align || "left";
+  uctx.textBaseline = baseline || "alphabetic";
+  if (gpx >= 12) { uctx.shadowColor = color; uctx.shadowBlur = gpx * s * 0.35; } // neon glow on big text
+  else { uctx.shadowBlur = 0; }
+  uctx.fillStyle = color;
+  uctx.fillText(txt, Math.round(gx * s), Math.round(gy * s));
+  uctx.shadowBlur = 0;
+}
+
+//----------------------------------------------------------------------- AUDIO
+// Tiny WebAudio blip synth for that 90s arcade crunch.
+let audioCtx = null, muted = false;
+function beep(freq, dur, type, vol) {
+  if (muted) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type || "square";
+    o.frequency.setValueAtTime(freq, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(40, freq * 0.5), t + dur);
+    g.gain.setValueAtTime((vol || 0.05), t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t); o.stop(t + dur);
+  } catch (e) {}
+}
+const sfx = {
+  volley:    () => beep(220, 0.08, "square", 0.04),
+  heroShot:  () => beep(660, 0.06, "sawtooth", 0.03),
+  alienDie:  () => beep(120, 0.18, "square", 0.06),
+  heroHit:   () => beep(90,  0.22, "sawtooth", 0.07),
+  heroDead:  () => { beep(200,0.5,"square",0.08); setTimeout(()=>beep(80,0.7,"sawtooth",0.08),120); },
+  wave:      () => beep(440, 0.25, "triangle", 0.05),
+};
+
+//------------------------------------------------------------------- STARFIELD
+const stars = [];
+for (let i = 0; i < 70; i++) {
+  stars.push({
+    x: rnd() * W, y: rnd() * H,
+    z: rrange(0.2, 1),                       // depth → speed + brightness
+  });
+}
+function updateStars(dt) {
+  for (const s of stars) {
+    s.y += (12 + s.z * 40) * dt;
+    if (s.y > H) { s.y = 0; s.x = rnd() * W; }
+  }
+}
+function drawStars() {
+  for (const s of stars) {
+    const b = Math.floor(60 + s.z * 160);
+    ctx.fillStyle = `rgb(${b},${b},${Math.min(255, b + 40)})`;
+    const sz = s.z > 0.7 ? 2 : 1;
+    ctx.fillRect(s.x | 0, s.y | 0, sz, sz);
+  }
+}
+
+//------------------------------------------------------------------ GAME STATE
+const GS = { TITLE: 0, PLAY: 1, OVER: 2 };
+let state = GS.TITLE;
+
+// Tunables
+const HERO_W = 9, HERO_H = 9;
+const HERO_MAX_HP = 130;
+const HERO_SPEED = 132;          // px/s
+const HERO_BAND_Y = H - 30;      // hero hovers near the bottom
+const HERO_FIRE_CD = 0.34;
+const HERO_BULLET_SPD = -240;
+
+const ALIEN_W = 9, ALIEN_H = 8;
+const HORDE_SPEED = 92;          // px/s the swarm steers at
+const VOLLEY_CD = 0.5;           // min seconds between SPACE volleys
+const ALIEN_BULLET_SPD = 120;
+const ALIEN_BULLET_DMG = 5;
+const RAM_DMG = 28;
+
+const FORMATION_COLS = 6;
+const FORMATION_ROWS = 3;
+const SPACING_X = 26, SPACING_Y = 24;
+const FLEET_RESERVE_START = 42;  // ships you can still deploy after wave 1
+
+let hero, aliens, heroBullets, alienBullets, particles;
+let horde;     // formation anchor + bookkeeping
+let fleetReserve, wave, score, endResult, endTimer, shakeT, flashT;
+let volleyTimer;
+
+// Initialize collections so the loop is safe BEFORE a game starts (title screen).
+aliens = []; heroBullets = []; alienBullets = []; particles = [];
+shakeT = 0; flashT = 0; volleyTimer = 0;
+
+function newGame() {
+  hero = { x: W / 2, y: HERO_BAND_Y, hp: HERO_MAX_HP, fireCd: 0, hitFlash: 0, t: 0 };
+  aliens = [];
+  heroBullets = [];
+  alienBullets = [];
+  particles = [];
+  horde = { x: W / 2, y: 46, dir: 1 };
+  fleetReserve = FLEET_RESERVE_START;
+  wave = 0;
+  score = 0;
+  endResult = "";
+  endTimer = 0;
+  shakeT = 0;
+  flashT = 0;
+  volleyTimer = 0;
+  spawnWave();
+}
+
+function spawnWave() {
+  wave++;
+  sfx.wave();
+  const cols = FORMATION_COLS;
+  const rows = Math.min(FORMATION_ROWS + Math.floor((wave - 1) / 2), 5);
+  let want = cols * rows;
+  // First wave is "free"; later waves draw from the reserve pool.
+  if (wave > 1) {
+    want = Math.min(want, fleetReserve);
+    fleetReserve -= want;
+  }
+  if (want <= 0) return;
+
+  const totalW = (cols - 1) * SPACING_X;
+  let placed = 0;
+  for (let r = 0; r < rows && placed < want; r++) {
+    for (let c = 0; c < cols && placed < want; c++) {
+      const type = ALIEN_TYPES[(r === 0 ? 2 : (c % 2)) % ALIEN_TYPES.length];
+      aliens.push({
+        ox: c * SPACING_X - totalW / 2,        // offset from horde anchor
+        oy: r * SPACING_Y,
+        x: 0, y: 0,
+        hp: type.hp,
+        type,
+        bob: rnd() * Math.PI * 2,
+        cooldown: rrange(0, 0.4),
+      });
+      placed++;
+    }
+  }
+  // Re-center the anchor near the top for the new wave.
+  horde.x = W / 2;
+  horde.y = 42;
+}
+
+//------------------------------------------------------------------ PARTICLES
+function explode(x, y, color, n, power) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd() * Math.PI * 2;
+    const sp = rrange(20, 60) * (power || 1);
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: rrange(0.3, 0.7), max: 0.7,
+      color,
+    });
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.92; p.vy *= 0.92;
+  }
+}
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+    ctx.fillStyle = p.color;
+    const s = p.life > 0.4 ? 2 : 1;
+    ctx.fillRect(p.x | 0, p.y | 0, s, s);
+  }
+  ctx.globalAlpha = 1;
+}
+
+//-------------------------------------------------------------------- CONTROLS
+const keys = {};
+window.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) e.preventDefault();
+  if (keys[k]) return; // ignore auto-repeat for edge actions
+  keys[k] = true;
+
+  if (k === "enter") {
+    if (state === GS.TITLE || state === GS.OVER) { newGame(); state = GS.PLAY; }
+  }
+  if (k === "m") muted = !muted;
+  if (k === "p" && state === GS.PLAY) paused = !paused;
+}, { passive: false });
+window.addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+let paused = false;
+
+function fireVolley() {
+  if (volleyTimer > 0 || aliens.length === 0) return;
+  volleyTimer = VOLLEY_CD;
+  sfx.volley();
+  // Honoring "every enemy fires": each alive alien spits a bolt downward.
+  for (const a of aliens) {
+    alienBullets.push({
+      x: a.x, y: a.y + ALIEN_H / 2,
+      vx: rrange(-12, 12), vy: ALIEN_BULLET_SPD,
+      color: a.type.bullet,
+    });
+  }
+}
+
+//------------------------------------------------------------- HORDE (PLAYER)
+function updateHorde(dt) {
+  let mx = 0, my = 0;
+  if (keys["a"] || keys["arrowleft"])  mx -= 1;
+  if (keys["d"] || keys["arrowright"]) mx += 1;
+  if (keys["w"] || keys["arrowup"])    my -= 1;
+  if (keys["s"] || keys["arrowdown"])  my += 1;
+  if (mx && my) { mx *= 0.7071; my *= 0.7071; }
+
+  horde.x += mx * HORDE_SPEED * dt;
+  horde.y += my * HORDE_SPEED * dt;
+
+  // Keep the whole formation on-screen by clamping the anchor to its extents.
+  let minOx = 0, maxOx = 0, minOy = 0, maxOy = 0;
+  for (const a of aliens) {
+    if (a.ox < minOx) minOx = a.ox;
+    if (a.ox > maxOx) maxOx = a.ox;
+    if (a.oy < minOy) minOy = a.oy;
+    if (a.oy > maxOy) maxOy = a.oy;
+  }
+  const pad = 6;
+  horde.x = clamp(horde.x, -minOx + ALIEN_W / 2 + pad, W - maxOx - ALIEN_W / 2 - pad);
+  // Allow the swarm to descend into ramming range of the defender (kamikaze tactic).
+  horde.y = clamp(horde.y, -minOy + ALIEN_H / 2 + pad, (HERO_BAND_Y - 4) - maxOy);
+
+  // Resolve each alien's world position (+ gentle idle bob).
+  for (const a of aliens) {
+    a.bob += dt * 3;
+    a.x = horde.x + a.ox;
+    a.y = horde.y + a.oy + Math.sin(a.bob) * 1.5;
+  }
+
+  if (keys[" "]) fireVolley();
+  if (volleyTimer > 0) volleyTimer -= dt;
+}
+
+//----------------------------------------------------------- DEFENDER (CPU AI)
+function lowestThreatAlien() {
+  // Pick a target the hero can shoot: prefer aliens lowest on screen & near.
+  let best = null, bestScore = -Infinity;
+  for (const a of aliens) {
+    const s = a.y - Math.abs(a.x - hero.x) * 0.5;
+    if (s > bestScore) { bestScore = s; best = a; }
+  }
+  return best;
+}
+
+function updateHero(dt) {
+  hero.t += dt;
+  if (hero.hitFlash > 0) hero.hitFlash -= dt;
+
+  // --- DODGE: sum lateral pressure away from incoming bolts & ramming aliens.
+  let push = 0;
+  for (const b of alienBullets) {
+    const dx = hero.x - b.x;
+    const dy = b.y - hero.y;        // bullet above & moving down toward hero
+    if (b.vy > 0 && dy < 0 && dy > -90 && Math.abs(dx) < 26) {
+      const prox = (1 - Math.abs(dx) / 26) * (1 - (-dy) / 90);
+      push += (dx === 0 ? (hero.x < W/2 ? 1 : -1) : sign(dx)) * prox * 1.6;
+    }
+  }
+  for (const a of aliens) {
+    const dx = hero.x - a.x;
+    const dy = a.y - hero.y;
+    if (Math.abs(dy) < 46 && Math.abs(dx) < 30) {
+      push += (dx === 0 ? -1 : sign(dx)) * (1 - Math.abs(dx) / 30) * 1.3;
+    }
+  }
+
+  let vx;
+  if (Math.abs(push) > 0.12) {
+    vx = clamp(push, -1, 1) * HERO_SPEED;
+  } else {
+    // --- HUNT: drift to line up a shot on the chosen target.
+    const tgt = lowestThreatAlien();
+    if (tgt) {
+      const dx = tgt.x - hero.x;
+      vx = clamp(dx * 4, -HERO_SPEED * 0.8, HERO_SPEED * 0.8);
+    } else {
+      vx = Math.sin(hero.t * 0.8) * HERO_SPEED * 0.3;
+    }
+  }
+  hero.x = clamp(hero.x + vx * dt, HERO_W, W - HERO_W);
+  // Subtle vertical hover so it reads as "alive".
+  hero.y = HERO_BAND_Y + Math.sin(hero.t * 2.2) * 4;
+
+  // --- SHOOT: fire upward when roughly aligned with a target.
+  hero.fireCd -= dt;
+  if (hero.fireCd <= 0 && aliens.length) {
+    const tgt = lowestThreatAlien();
+    if (tgt && Math.abs(tgt.x - hero.x) < 9) {
+      heroBullets.push({ x: hero.x, y: hero.y - HERO_H / 2, vy: HERO_BULLET_SPD });
+      hero.fireCd = HERO_FIRE_CD;
+      sfx.heroShot();
+    } else {
+      hero.fireCd = 0.05; // re-check soon
+    }
+  }
+}
+
+//------------------------------------------------------------------- BULLETS
+function updateBullets(dt) {
+  for (let i = heroBullets.length - 1; i >= 0; i--) {
+    const b = heroBullets[i];
+    b.y += b.vy * dt;
+    if (b.y < -4) { heroBullets.splice(i, 1); continue; }
+    // vs aliens
+    for (let j = aliens.length - 1; j >= 0; j--) {
+      const a = aliens[j];
+      if (aabb(b.x - 1, b.y - 3, 2, 6, a.x - ALIEN_W/2, a.y - ALIEN_H/2, ALIEN_W, ALIEN_H)) {
+        heroBullets.splice(i, 1);
+        a.hp--;
+        explode(b.x, b.y, "#ffd34d", 4, 0.6);
+        if (a.hp <= 0) {
+          explode(a.x, a.y, a.type.bullet, 14, 1);
+          score += a.type.score;
+          aliens.splice(j, 1);
+          sfx.alienDie();
+        }
+        break;
+      }
+    }
+  }
+
+  for (let i = alienBullets.length - 1; i >= 0; i--) {
+    const b = alienBullets[i];
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.y > H + 4) { alienBullets.splice(i, 1); continue; }
+    if (aabb(b.x - 1, b.y - 2, 2, 5, hero.x - HERO_W/2, hero.y - HERO_H/2, HERO_W, HERO_H)) {
+      alienBullets.splice(i, 1);
+      damageHero(ALIEN_BULLET_DMG);
+      explode(hero.x, hero.y, "#ff5db0", 6, 0.8);
+    }
+  }
+}
+
+function damageHero(amt) {
+  hero.hp -= amt;
+  hero.hitFlash = 0.12;
+  shakeT = Math.max(shakeT, 0.12);
+  sfx.heroHit();
+  if (hero.hp <= 0) {
+    hero.hp = 0;
+    explode(hero.x, hero.y, "#37c7ff", 40, 2);
+    shakeT = 0.6; flashT = 0.4;
+    sfx.heroDead();
+    endResult = "win";
+    endTimer = 1.2;
+  }
+}
+
+//------------------------------------------------------------------- COLLISIONS
+function checkRamming() {
+  for (let j = aliens.length - 1; j >= 0; j--) {
+    const a = aliens[j];
+    if (aabb(a.x - ALIEN_W/2, a.y - ALIEN_H/2, ALIEN_W, ALIEN_H,
+             hero.x - HERO_W/2, hero.y - HERO_H/2, HERO_W, HERO_H)) {
+      explode(a.x, a.y, a.type.bullet, 16, 1.2);
+      aliens.splice(j, 1);
+      damageHero(RAM_DMG);
+    }
+  }
+}
+
+//------------------------------------------------------------------- DRAWING
+function drawSpriteCentered(spr, x, y) {
+  ctx.drawImage(spr, Math.round(x - spr.cx), Math.round(y - spr.cy));
+}
+
+function drawHUD() {
+  // HERO HP bar (top-left)
+  ctx.fillStyle = "#0a1426";
+  ctx.fillRect(6, 6, 92, 8);
+  const hpw = Math.round(88 * (hero.hp / HERO_MAX_HP));
+  ctx.fillStyle = hero.hp > HERO_MAX_HP * 0.3 ? "#37c7ff" : "#ff5db0";
+  ctx.fillRect(8, 8, hpw, 4);
+
+  uiText("DEFENDER", 6, 16, 8, "#9fe6ff", "left", "top");
+  // Fleet + wave + score (top-right)
+  uiText("FLEET " + (aliens.length + fleetReserve), W - 6, 5, 8, "#5dff8a", "right", "top");
+  uiText("WAVE " + wave, W - 6, 16, 8, "#ffd34d", "right", "top");
+  uiText("SCORE " + score, W - 6, 27, 8, "#c8f7ff", "right", "top");
+}
+
+function render() {
+  // Refresh the high-res text layer and clear it for this frame.
+  syncUI();
+  uctx.clearRect(0, 0, ui.width, ui.height);
+
+  // screen shake
+  let sx = 0, sy = 0;
+  if (shakeT > 0) { sx = rrange(-2, 2) * (shakeT*4); sy = rrange(-2, 2) * (shakeT*4); }
+  ctx.save();
+  ctx.translate(sx | 0, sy | 0);
+
+  ctx.fillStyle = "#05070d";
+  ctx.fillRect(-4, -4, W + 8, H + 8);
+  drawStars();
+
+  if (state === GS.TITLE) { drawTitle(); ctx.restore(); return; }
+
+  // bullets
+  for (const b of heroBullets) {
+    ctx.fillStyle = "#bff7ff";
+    ctx.fillRect((b.x|0) - 1, (b.y|0) - 3, 2, 6);
+    ctx.fillStyle = "#ffd34d";
+    ctx.fillRect((b.x|0), (b.y|0) - 3, 1, 3);
+  }
+  for (const b of alienBullets) {
+    ctx.fillStyle = b.color;
+    ctx.fillRect((b.x|0) - 1, (b.y|0) - 2, 2, 5);
+  }
+
+  for (const a of aliens) drawSpriteCentered(a.type.spr, a.x, a.y);
+
+  if (hero.hp > 0) {
+    if (hero.hitFlash > 0 && (Math.floor(hero.t * 40) % 2 === 0)) {
+      // flash white when hit
+      ctx.save(); ctx.globalCompositeOperation = "lighter";
+      drawSpriteCentered(HERO_SPR, hero.x, hero.y);
+      ctx.restore();
+    } else {
+      drawSpriteCentered(HERO_SPR, hero.x, hero.y);
+    }
+  }
+
+  drawParticles();
+  drawHUD();
+
+  if (paused) {
+    overlay("PAUSED", "press P to resume", "#9fe6ff");
+  }
+  if (state === GS.OVER) {
+    if (endResult === "win")
+      overlay("DEFENDER DESTROYED", "the colony is yours — ENTER to play again", "#5dff8a");
+    else
+      overlay("FLEET ANNIHILATED", "the defender held the line — ENTER to retry", "#ff5db0");
+  }
+
+  // white flash on big hit / death
+  if (flashT > 0) {
+    ctx.globalAlpha = clamp(flashT, 0, 0.5);
+    ctx.fillStyle = "#dffaff";
+    ctx.fillRect(-4, -4, W + 8, H + 8);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+function overlay(title, sub, color) {
+  ctx.fillStyle = "rgba(5,7,13,0.7)";
+  ctx.fillRect(0, H/2 - 34, W, 68);
+  uiText(title, W/2, H/2 - 12, 15, color, "center", "middle");
+  uiText(sub, W/2, H/2 + 8, 8, "#9fe6ff", "center", "middle");
+  if (state === GS.OVER) {
+    uiText("FINAL SCORE  " + score + "   •   WAVES  " + wave, W/2, H/2 + 22, 8, "#ffd34d", "center", "middle");
+  }
+}
+
+let titleT = 0;
+function drawTitle() {
+  // demo aliens drifting
+  uiText("REVERSE", W/2, H/2 - 50, 20, "#5dff8a", "center", "middle");
+  uiText("INVADERS", W/2, H/2 - 30, 20, "#ff5db0", "center", "middle");
+
+  // little marquee row of aliens
+  const t = titleT;
+  for (let i = 0; i < 6; i++) {
+    const spr = ALIEN_TYPES[i % 3].spr;
+    const x = W/2 - 75 + i * 30 + Math.sin(t * 2 + i) * 4;
+    drawSpriteCentered(spr, x, H/2 - 6);
+  }
+  drawSpriteCentered(HERO_SPR, W/2 + Math.sin(t) * 60, H/2 + 22);
+
+  uiText("YOU COMMAND THE HORDE. THE MACHINE DEFENDS.", W/2, H/2 + 46, 9, "#c8f7ff", "center", "middle");
+  const blink = (Math.floor(t * 2) % 2) ? "#ffd34d" : "#7a6a2a";
+  uiText("PRESS ENTER TO BEGIN", W/2, H/2 + 66, 11, blink, "center", "middle");
+}
+
+//------------------------------------------------------------------- MAIN LOOP
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05; // clamp big hitches
+
+  titleT += dt;
+  updateStars(dt);
+
+  if (state === GS.PLAY && !paused) {
+    if (shakeT > 0) shakeT -= dt;
+    if (flashT > 0) flashT -= dt;
+
+    updateHorde(dt);
+    updateHero(dt);
+    updateBullets(dt);
+    checkRamming();
+    updateParticles(dt);
+
+    // Wave / win-loss bookkeeping
+    if (endResult === "win") {
+      endTimer -= dt;
+      if (endTimer <= 0) state = GS.OVER;
+    } else if (aliens.length === 0) {
+      if (fleetReserve > 0) {
+        spawnWave();
+      } else {
+        // No ships on field and none in reserve → the human has lost.
+        endResult = "lose";
+        state = GS.OVER;
+      }
+    }
+  } else {
+    updateParticles(dt);
+    if (shakeT > 0) shakeT -= dt;
+    if (flashT > 0) flashT -= dt;
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
