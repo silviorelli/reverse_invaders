@@ -6,9 +6,13 @@ the lone defender before your fleet is wiped out.
 
 Built as a single self-contained HTML file — HTML5 canvas, no dependencies, no build step.
 
+> 🤖 This project was **vibecoded** with almost a single prompt.
+
 ## Play
 
-Just open `index.html` in any modern browser:
+🎮 **Play it now in your browser:** [reverse-invaders.tiiny.site](https://reverse-invaders.tiiny.site)
+
+Or open `index.html` in any modern browser:
 
 ```
 # either open the file directly...
