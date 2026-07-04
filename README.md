@@ -10,7 +10,7 @@ Built as a single self-contained HTML file — HTML5 canvas, no dependencies, no
 
 ## Play
 
-🎮 **Play it now in your browser:** [reverse-invaders.tiiny.site](https://reverse-invaders.tiiny.site)
+🎮 **Play it now in your browser:** [https://reverse-invaders.relli.it/](https://reverse-invaders.relli.it/)
 
 Or open `index.html` in any modern browser:
 
